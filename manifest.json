@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "IMA 文档批量下载工具",
+  "version": "1.0.0",
+  "description": "批量下载 IMA 知识库中的文档",
+  "icons": {
+    "16": "icons/icon_sima.png",
+    "48": "icons/icon_sima.png",
+    "128": "icons/icon_sima.png"
+  },
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "storage",
+    "unlimitedStorage",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "*://ima.qq.com/*",
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "IMA 下载工具",
+    "default_icon": {
+      "16": "icons/icon_sima.png",
+      "24": "icons/icon_sima.png",
+      "32": "icons/icon_sima.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://ima.qq.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
