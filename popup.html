@@ -88,7 +88,7 @@
         </div>
         <div class="step-content">
           <div id="scan-result" class="selected-info hidden">
-            共 <span id="total-files">0</span> 个文件，已选择 <span id="selected-files">0</span> 个
+            共 <span id="total-files">0</span> 个文件 · 已下载 <span id="downloaded-files">0</span> · 未下载 <span id="undownloaded-files">0</span> · 已选择 <span id="selected-files">0</span> 个
           </div>
           <div id="file-list-section" class="hidden">
             <div class="file-list-header">
@@ -96,7 +96,10 @@
                 <input type="checkbox" id="select-all-checkbox" checked>
                 <span>全选</span>
               </label>
-              <button id="collapse-all-btn" class="btn-small">全部折叠</button>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <button id="select-undownloaded-btn" class="btn-small">全选未下载</button>
+                <button id="collapse-all-btn" class="btn-small">全部折叠</button>
+              </div>
             </div>
             <div id="file-list" class="file-list tree-view"></div>
           </div>
@@ -131,6 +134,26 @@
         <button id="clear-log-btn" class="btn-small">清空</button>
       </div>
       <div id="log-content" class="log-content"></div>
+    </div>
+  </div>
+
+  <!-- 下载确认模态框 -->
+  <div id="download-confirm-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>确认下载</h3>
+        <button id="modal-close-btn" class="btn-small" title="关闭">×</button>
+      </div>
+      <div class="modal-summary">
+        选中 <span id="modal-total">0</span> 个文件 ·
+        已下载 <span id="modal-done">0</span>（将跳过）·
+        将下载 <span id="modal-todo">0</span>
+      </div>
+      <div id="modal-file-list" class="modal-body"></div>
+      <div class="modal-footer">
+        <button id="modal-cancel-btn" class="btn btn-secondary">取消</button>
+        <button id="modal-confirm-btn" class="btn btn-primary">确认下载</button>
+      </div>
     </div>
   </div>
 

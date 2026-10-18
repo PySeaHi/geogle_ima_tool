@@ -5,6 +5,8 @@ let selectedKb = null;
 let scannedFiles = [];
 let fileTreeData = null; // 文件树数据模型，用于跟踪勾选状态
 let saveDirHandle = null; // 用户选择的保存目录句柄
+let downloadRecords = {}; // 当前知识库的下载记录（mediaId -> { status, ... }）
+let pendingDownloadFiles = []; // 下载确认弹窗内待确认的文件快照
 
 /**
  * 持久化目录句柄到 IndexedDB（与 background.js 共用同一数据库）
@@ -23,6 +25,17 @@ function persistSaveDirHandle(handle) {
     };
     req.onerror = () => reject(req.error);
   });
+}
+
+/**
+ * 读取某知识库的下载记录（mediaId -> { status, ... }）
+ * 直接读 chrome.storage.local，与扫描缓存 checkScanCache 的方式保持一致
+ */
+async function loadDownloadRecords(kbId) {
+  const key = `download_records_${kbId}`;
+  const got = await chrome.storage.local.get(key);
+  downloadRecords = got[key] || {};
+  return downloadRecords;
 }
 
 // 页面加载完成后检查免责声明和登录状态
@@ -128,6 +141,17 @@ function setupEventListeners() {
 
   // 全部折叠/展开按钮
   document.getElementById("collapse-all-btn").addEventListener("click", toggleCollapseAll);
+
+  // 全选未下载按钮
+  document.getElementById("select-undownloaded-btn").addEventListener("click", selectUndownloaded);
+
+  // 下载确认弹窗按钮
+  document.getElementById("modal-close-btn").addEventListener("click", closeDownloadConfirm);
+  document.getElementById("modal-cancel-btn").addEventListener("click", closeDownloadConfirm);
+  document.getElementById("modal-confirm-btn").addEventListener("click", confirmDownload);
+  document.getElementById("download-confirm-modal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeDownloadConfirm();
+  });
 
   // 清除缓存按钮
   document.getElementById("clear-cache-btn").addEventListener("click", clearScanCache);
@@ -384,15 +408,21 @@ async function scanFiles() {
     scannedFiles = response.data.files;
     const folders = response.data.folders;
 
+    // 加载下载记录并标注每个文件的下载状态
+    await loadDownloadRecords(selectedKb.id);
+    scannedFiles = scannedFiles.map((f) => ({
+      ...f,
+      downloadStatus: (downloadRecords[f.mediaId] && downloadRecords[f.mediaId].status) || "pending"
+    }));
+
     // 显示扫描结果
     document.getElementById("scan-result").classList.remove("hidden");
     document.getElementById("total-files").textContent = scannedFiles.length;
-    document.getElementById("selected-files").textContent = scannedFiles.length;
+    updateDownloadSummary();
 
     // 显示文件列表
     displayFileList(scannedFiles);
-
-    document.getElementById("download-btn").disabled = scannedFiles.length === 0;
+    updateSelectedCount();
 
     log(`✓ 扫描完成: ${scannedFiles.length} 个文件, ${folders.length} 个文件夹`, "success");
     showNotification(`找到 ${scannedFiles.length} 个文件`, "success");
@@ -442,9 +472,22 @@ function buildFileTree(files) {
       }
     }
 
-    // 添加文件到当前层
-    current.files.push({ ...file, index, checked: true });
+    // 添加文件到当前层（已下载文件默认不勾选）
+    current.files.push({ ...file, index, checked: file.downloadStatus !== "done" });
   });
+
+  // 计算每个文件夹节点是否含未完成（非 done）文件，用于文件夹勾选框默认状态
+  (function computeFolderState(node) {
+    let hasUndone = false;
+    for (const child of Object.values(node.children)) {
+      if (computeFolderState(child)) hasUndone = true;
+    }
+    for (const f of node.files) {
+      if (f.downloadStatus !== "done") hasUndone = true;
+    }
+    node.folderHasUndone = hasUndone;
+    return hasUndone;
+  })(root);
 
   return root;
 }
@@ -470,7 +513,7 @@ function renderTreeNode(node, container, depth = 0) {
       <span class="tree-toggle">▶</span>
       <span class="tree-folder-icon">📁</span>
       <label class="tree-folder-label">
-        <input type="checkbox" class="folder-checkbox" data-folder="${escapeHtml(folder.name)}" checked>
+        <input type="checkbox" class="folder-checkbox" data-folder="${escapeHtml(folder.name)}" ${folder.folderHasUndone ? "checked" : ""}>
         <span class="tree-folder-name">${escapeHtml(name)}</span>
       </label>
       <span class="tree-folder-count">(${fileCount} 个文件)</span>
@@ -529,11 +572,14 @@ function renderTreeNode(node, container, depth = 0) {
 
     const sizeStr = file.fileSize ? formatFileSize(file.fileSize) : "";
     const ext = getFileExtension(file.title);
+    const status = file.downloadStatus || "pending";
+    const statusLabels = { done: "已下载", failed: "失败", pending: "未下载" };
 
     item.innerHTML = `
-      <input type="checkbox" class="file-checkbox" data-index="${file.index}" checked>
+      <input type="checkbox" class="file-checkbox" data-index="${file.index}" ${file.checked ? "checked" : ""}>
       <span class="tree-file-ext">${ext || "📄"}</span>
       <span class="tree-file-name" title="${escapeHtml(file.path || file.title)}">${escapeHtml(file.title)}</span>
+      <span class="tree-file-status ${status}">${statusLabels[status] || "未下载"}</span>
       ${sizeStr ? `<span class="tree-file-size">${sizeStr}</span>` : ""}
     `;
 
@@ -684,8 +730,8 @@ function displayFileList(files) {
   // 渲染
   renderTreeNode(tree, list, 0);
 
-  // 全选/取消全选
-  document.getElementById("select-all-checkbox").checked = true;
+  // 全选默认状态：仅当所有文件都未下载时全选（保持首次全量下载行为不变）
+  document.getElementById("select-all-checkbox").checked = files.every(f => f.downloadStatus !== "done");
   document.getElementById("select-all-checkbox").addEventListener("change", (e) => {
     const checked = e.target.checked;
     // 更新数据模型
@@ -699,6 +745,64 @@ function displayFileList(files) {
     });
     updateSelectedCount();
   });
+
+  // 下载按钮文案：存在已下载且仍有未完成文件时显示「继续下载」
+  const hasDone = files.some(f => f.downloadStatus === "done");
+  const hasUndone = files.some(f => f.downloadStatus !== "done");
+  document.getElementById("download-btn").textContent = (hasDone && hasUndone) ? "继续下载" : "开始下载";
+}
+
+/**
+ * 应用默认勾选：仅勾选未完成（未下载/失败）文件
+ */
+function selectUndownloaded() {
+  if (!fileTreeData) return;
+  (function apply(node) {
+    for (const child of Object.values(node.children)) {
+      apply(child);
+    }
+    for (const file of node.files) {
+      file.checked = file.downloadStatus !== "done";
+    }
+    node.checked = node.folderHasUndone;
+  })(fileTreeData);
+
+  // 同步 DOM 勾选状态
+  const list = document.getElementById("file-list");
+  list.querySelectorAll(".file-checkbox").forEach(cb => {
+    const idx = parseInt(cb.dataset.index, 10);
+    const file = scannedFiles[idx];
+    cb.checked = file && file.downloadStatus !== "done";
+  });
+  list.querySelectorAll(".folder-checkbox").forEach(cb => {
+    const folderName = cb.dataset.folder;
+    // 从已渲染的顶层逐层找节点，简化：递归遍历并匹配
+    cb.checked = folderHasUndoneByName(fileTreeData, folderName);
+  });
+
+  updateSelectedCount();
+}
+
+/**
+ * 按文件夹名查找其 folderHasUndone（用于「全选未下载」时同步文件夹勾选框）
+ */
+function folderHasUndoneByName(node, name) {
+  for (const child of Object.values(node.children)) {
+    if (child.name === name) return child.folderHasUndone;
+    if (folderHasUndoneByName(child, name)) return true;
+  }
+  return false;
+}
+
+/**
+ * 更新摘要统计（已下载 / 未下载）
+ */
+function updateDownloadSummary() {
+  const total = scannedFiles.length;
+  const downloaded = scannedFiles.filter(f => f.downloadStatus === "done").length;
+  const undownloaded = total - downloaded;
+  document.getElementById("downloaded-files").textContent = downloaded;
+  document.getElementById("undownloaded-files").textContent = undownloaded;
 }
 
 /**
@@ -786,12 +890,18 @@ async function cancelDownload() {
 }
 
 /**
- * 开始下载
+ * 开始下载：先收集勾选文件并弹出确认框
  */
-async function startDownload() {
+function startDownload() {
   const selectedFiles = getSelectedFiles();
   if (selectedFiles.length === 0) return;
+  openDownloadConfirm(selectedFiles);
+}
 
+/**
+ * 真正执行下载
+ */
+async function doDownload(files) {
   const btn = document.getElementById("download-btn");
   const originalText = btn.innerHTML;
   btn.disabled = true;
@@ -803,7 +913,7 @@ async function startDownload() {
 
   const progressDiv = document.getElementById("download-progress");
   progressDiv.classList.remove("hidden");
-  document.getElementById("total-count").textContent = selectedFiles.length;
+  document.getElementById("total-count").textContent = files.length;
 
   // 若已选择保存文件夹（File System Access），文件直接写入所选文件夹；否则回退到 Chrome 下载目录
   const customPath = document.getElementById("save-path-input").value.trim();
@@ -815,7 +925,7 @@ async function startDownload() {
     const response = await chrome.runtime.sendMessage({
       type: "BATCH_DOWNLOAD",
       accountInfo: accountInfo,
-      files: selectedFiles,
+      files: files,
       outputDir: outputDir,
       concurrency: 3
     });
@@ -846,6 +956,71 @@ async function startDownload() {
     btn.disabled = false;
     btn.innerHTML = originalText;
   }
+}
+
+/**
+ * 打开下载确认弹窗
+ */
+function openDownloadConfirm(files) {
+  pendingDownloadFiles = files;
+  const listEl = document.getElementById("modal-file-list");
+  listEl.innerHTML = "";
+
+  const statusLabels = { done: "已下载", failed: "失败", pending: "未下载" };
+
+  files.forEach((file, i) => {
+    const status = file.downloadStatus || "pending";
+    const checked = status !== "done";
+    const row = document.createElement("label");
+    row.className = "modal-file-item" + (status === "done" ? " done" : "");
+    row.innerHTML = `
+      <input type="checkbox" class="modal-file-checkbox" data-index="${i}" ${checked ? "checked" : ""}>
+      <span class="tree-file-status ${status}">${statusLabels[status] || "未下载"}</span>
+      <span class="modal-file-name" title="${escapeHtml(file.path || file.title)}">${escapeHtml(file.title)}</span>
+      ${file.fileSize ? `<span class="modal-file-size">${formatFileSize(file.fileSize)}</span>` : ""}
+    `;
+    listEl.appendChild(row);
+  });
+
+  listEl.querySelectorAll(".modal-file-checkbox").forEach(cb => {
+    cb.addEventListener("change", updateModalSummary);
+  });
+
+  updateModalSummary();
+  document.getElementById("download-confirm-modal").classList.remove("hidden");
+}
+
+/**
+ * 关闭下载确认弹窗
+ */
+function closeDownloadConfirm() {
+  document.getElementById("download-confirm-modal").classList.add("hidden");
+}
+
+/**
+ * 更新弹窗统计与确认按钮状态
+ */
+function updateModalSummary() {
+  const total = pendingDownloadFiles.length;
+  const done = pendingDownloadFiles.filter(f => f.downloadStatus === "done").length;
+  const checkedCount = document.querySelectorAll(".modal-file-checkbox:checked").length;
+
+  document.getElementById("modal-total").textContent = total;
+  document.getElementById("modal-done").textContent = done;
+  document.getElementById("modal-todo").textContent = checkedCount;
+  document.getElementById("modal-confirm-btn").disabled = checkedCount === 0;
+}
+
+/**
+ * 确认下载：仅下载弹窗中勾选的文件
+ */
+function confirmDownload() {
+  const checkedBoxes = document.querySelectorAll(".modal-file-checkbox:checked");
+  const files = Array.from(checkedBoxes).map(cb => pendingDownloadFiles[parseInt(cb.dataset.index, 10)]);
+  if (files.length === 0) return;
+
+  closeDownloadConfirm();
+  doDownload(files);
 }
 
 /**

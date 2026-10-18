@@ -12,6 +12,66 @@ let downloadState = {
 // 当前进行中的下载 ID 集合（用于暂停/恢复/取消真实下载）
 let activeDownloadIds = new Set();
 
+// ============ 下载记录持久化（任务级断点续传） ============
+
+/**
+ * 下载记录存储 key（按知识库隔离）
+ */
+function downloadRecordsKey(knowledgeBaseId) {
+  return `download_records_${knowledgeBaseId}`;
+}
+
+/**
+ * 读取某知识库的下载记录（mediaId -> { status, ... }）
+ */
+async function loadDownloadRecords(knowledgeBaseId) {
+  const key = downloadRecordsKey(knowledgeBaseId);
+  const got = await chrome.storage.local.get(key);
+  return got[key] || {};
+}
+
+/**
+ * 标记文件下载成功
+ */
+async function markFileDownloaded(file, result) {
+  return enqueueRecordWrite(async () => {
+    const key = downloadRecordsKey(file.knowledgeBaseId);
+    const records = await loadDownloadRecords(file.knowledgeBaseId);
+    records[file.mediaId] = {
+      status: "done",
+      title: file.title,
+      doneAt: Date.now(),
+      path: (result && result.path) || ""
+    };
+    await chrome.storage.local.set({ [key]: records });
+  });
+}
+
+/**
+ * 标记文件下载失败
+ */
+async function markFileFailed(file, error) {
+  return enqueueRecordWrite(async () => {
+    const key = downloadRecordsKey(file.knowledgeBaseId);
+    const records = await loadDownloadRecords(file.knowledgeBaseId);
+    records[file.mediaId] = {
+      status: "failed",
+      title: file.title,
+      failAt: Date.now(),
+      error: error || "未知错误"
+    };
+    await chrome.storage.local.set({ [key]: records });
+  });
+}
+
+// 记录写入串行化：并发批次的读-改-写会相互覆盖，用队列保证逐条写入
+let recordWriteQueue = Promise.resolve();
+function enqueueRecordWrite(fn) {
+  const next = recordWriteQueue.then(fn, fn);
+  recordWriteQueue = next.catch(() => {});
+  return next;
+}
+
 // RSA 公钥（用于加密 AES 密钥）
 const RSA_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx9h6SY1LO88wRVKdOC5U
@@ -1134,6 +1194,7 @@ async function batchDownload(headers, files, outputDir, concurrency = 3) {
 
           const result = await downloadFile(headers, file, fullPath);
           completed++;
+          await markFileDownloaded(file, result);
 
           // 发送进度
           chrome.runtime.sendMessage({
@@ -1151,6 +1212,7 @@ async function batchDownload(headers, files, outputDir, concurrency = 3) {
           };
         } catch (error) {
           failed++;
+          await markFileFailed(file, error.message);
           console.error(`[下载失败] ${file.title}:`, error);
 
           // 发送进度
